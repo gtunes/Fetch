@@ -17,7 +17,6 @@ namespace Fetch;
  *
  * @package Fetch
  * @author  Robert Hafner <tedivm@tedivm.com>
- * @author  Patrik Karisch <patrik.karisch@abimus.com>
  */
 class Message
 {
@@ -157,26 +156,54 @@ class Message
     protected $attachments = array();
 
     /**
+     * Contains the mailbox that the message resides in.
+     *
+     * @var string
+     */
+    protected $mailbox;
+
+    /**
      * This value defines the encoding we want the email message to use.
      *
      * @var string
      */
-    public static $charset = 'UTF-8//TRANSLIT';
+    public static $charset = 'UTF-8';
+
+    /**
+     * This value defines the flag set for encoding if the mb_convert_encoding
+     * function can't be found, and in this case iconv encoding will be used.
+     *
+     * @var string
+     */
+    public static $charsetFlag = '//TRANSLIT';
+
+    /**
+     * These constants can be used to easily access available flags
+     */
+    const FLAG_RECENT = 'recent';
+    const FLAG_FLAGGED = 'flagged';
+    const FLAG_ANSWERED = 'answered';
+    const FLAG_DELETED = 'deleted';
+    const FLAG_SEEN = 'seen';
+    const FLAG_DRAFT = 'draft';
 
     /**
      * This constructor takes in the uid for the message and the Imap class representing the mailbox the
      * message should be opened from. This constructor should generally not be called directly, but rather retrieved
      * through the apprioriate Imap functions.
      *
-     * @param int    $messageUniqueId
+     * @param int $messageUniqueId
      * @param Server $mailbox
      */
-    public function __construct($messageUniqueId, Server $mailbox)
+    public function __construct($messageUniqueId, Server $connection)
     {
-        $this->imapConnection = $mailbox;
-        $this->uid            = $messageUniqueId;
-        $this->imapStream     = $this->imapConnection->getImapStream();
-        $this->loadMessage();
+        $this->imapConnection = $connection;
+        $this->mailbox = $connection->getMailBox();
+        $this->uid = $messageUniqueId;
+        $this->imapStream = $this->imapConnection->getImapStream();
+        if ($this->loadMessage() !== true) {
+            throw new \RuntimeException('Message with ID ' . $messageUniqueId . ' not found.');
+        }
     }
 
     /**
@@ -186,62 +213,54 @@ class Message
      */
     protected function loadMessage()
     {
-        $this->loadOverview();
-        $this->loadHeaders();
-        $this->loadStructure();
-    }
 
-    /**
-     * Load the message overview information.
-     */
-    protected function loadOverview()
-    {
-        $messageOverview = $this->getOverview();
+        /* First load the message overview information */
+
+        if (!is_object($messageOverview = $this->getOverview())) {
+            return false;
+        }
 
         $this->subject = isset($messageOverview->subject) ? $messageOverview->subject : null;
-        $this->date    = isset($messageOverview->date) ? strtotime($messageOverview->date) : null;
-        $this->size    = isset($messageOverview->size) ? $messageOverview->size : null;
+        $this->date = strtotime($messageOverview->date);
+        $this->size = $messageOverview->size;
 
         foreach (self::$flagTypes as $flag) {
-            $this->status[$flag] = !empty($messageOverview->$flag);
+            $this->status[$flag] = ($messageOverview->$flag == 1);
         }
-    }
 
-    /**
-     * Load in all of the header information.
-     */
-    protected function loadHeaders()
-    {
+        /* Next load in all of the header information */
+
         $headers = $this->getHeaders();
 
-        if (isset($headers->to))
+        if (isset($headers->to)) {
             $this->to = $this->processAddressObject($headers->to);
+        }
 
-        if (isset($headers->cc))
+        if (isset($headers->cc)) {
             $this->cc = $this->processAddressObject($headers->cc);
+        }
 
-        if (isset($headers->bcc))
+        if (isset($headers->bcc)) {
             $this->bcc = $this->processAddressObject($headers->bcc);
+        }
 
-        $this->from    = isset($headers->from) ? $this->processAddressObject($headers->from) : '';
+        $this->from = isset($headers->from) ? $this->processAddressObject($headers->from) : array('');
         $this->replyTo = isset($headers->reply_to) ? $this->processAddressObject($headers->reply_to) : $this->from;
-    }
 
-    /**
-     * Load the message structure itself.
-     */
-    protected function loadStructure()
-    {
+        /* Finally load the structure itself */
+
         $structure = $this->getStructure();
-
         if (!isset($structure->parts)) {
             // not multipart
             $this->processStructure($structure);
         } else {
             // multipart
-            foreach ($structure->parts as $id => $part)
+            foreach ($structure->parts as $id => $part) {
                 $this->processStructure($part, $id + 1);
+            }
         }
+
+        return true;
     }
 
     /**
@@ -249,14 +268,14 @@ class Message
      * imap_fetch_overview function, only instead of an array of message overviews only a single result is returned. The
      * results are only retrieved from the server once unless passed true as a parameter.
      *
-     * @param  bool      $forceReload
+     * @param  bool $forceReload
      * @return \stdClass
      */
     public function getOverview($forceReload = false)
     {
         if ($forceReload || !isset($this->messageOverview)) {
             // returns an array, and since we just want one message we can grab the only result
-            $results               = imap_fetch_overview($this->imapStream, $this->uid, FT_UID);
+            $results = imap_fetch_overview($this->imapStream, $this->uid, FT_UID);
             $this->messageOverview = array_shift($results);
         }
 
@@ -268,7 +287,7 @@ class Message
      * and running them through the imap_rfc822_parse_headers function. The results are only retrieved from the server
      * once unless passed true as a parameter.
      *
-     * @param  bool      $forceReload
+     * @param  bool $forceReload
      * @return \stdClass
      */
     public function getHeaders($forceReload = false)
@@ -294,7 +313,7 @@ class Message
      * returned by imap_fetchstructure. The results are only retrieved from the server once unless passed true as a
      * parameter.
      *
-     * @param  bool      $forceReload
+     * @param  bool $forceReload
      * @return \stdClass
      */
     public function getStructure($forceReload = false)
@@ -312,7 +331,7 @@ class Message
      * the plaintext version is given some html formatting and returned. If neither are present the return value will be
      * false.
      *
-     * @param  bool        $html Pass true to receive an html response.
+     * @param  bool $html Pass true to receive an html response.
      * @return string|bool Returns false if no body is present.
      */
     public function getMessageBody($html = false)
@@ -328,7 +347,8 @@ class Message
             }
         } else {
             if (!isset($this->plaintextMessage) && isset($this->htmlMessage)) {
-                $output = strip_tags($this->htmlMessage);
+                $output = preg_replace('/\<br(\s*)?\/?\>/i', PHP_EOL, trim($this->htmlMessage));
+                $output = strip_tags($output);
 
                 return $output;
             } elseif (isset($this->plaintextMessage)) {
@@ -343,30 +363,34 @@ class Message
      * This function returns either an array of email addresses and names or, optionally, a string that can be used in
      * mail headers.
      *
-     * @param  string            $type     Should be 'to', 'cc', 'bcc', 'from', or 'reply-to'.
-     * @param  bool              $asString
+     * @param  string $type Should be 'to', 'cc', 'bcc', 'from', or 'reply-to'.
+     * @param  bool $asString
      * @return array|string|bool
      */
     public function getAddresses($type, $asString = false)
     {
-        $addressTypes = array('to', 'cc', 'bcc', 'from', 'reply-to');
+        $type = ($type == 'reply-to') ? 'replyTo' : $type;
+        $addressTypes = array('to', 'cc', 'bcc', 'from', 'replyTo');
 
-        if (!in_array($type, $addressTypes) || !isset($this->$type) || count($this->$type) < 1)
+        if (!in_array($type, $addressTypes) || !isset($this->$type) || count($this->$type) < 1) {
             return false;
-
+        }
 
         if (!$asString) {
-            if ($type == 'from')
+            if ($type == 'from') {
                 return $this->from[0];
+            }
 
             return $this->$type;
         } else {
             $outputString = '';
             foreach ($this->$type as $address) {
-                if (isset($set))
+                if (isset($set)) {
                     $outputString .= ', ';
-                if (!isset($set))
+                }
+                if (!isset($set)) {
                     $set = true;
+                }
 
                 $outputString .= isset($address['name']) ?
                     $address['name'] . ' <' . $address['address'] . '>'
@@ -423,28 +447,36 @@ class Message
      * message has its own subparts, those are recursively processed using this function.
      *
      * @param \stdClass $structure
-     * @param string    $partIdentifier
-     * @todoa process attachments.
+     * @param string $partIdentifier
      */
     protected function processStructure($structure, $partIdentifier = null)
     {
         $parameters = self::getParametersFromStructure($structure);
 
-        if (isset($parameters['name']) || isset($parameters['filename'])) {
-            $attachment          = new Attachment($this, $structure, $partIdentifier);
+        if ((isset($parameters['name']) || isset($parameters['filename']))
+            || (isset($structure->subtype) && strtolower($structure->subtype) == 'rfc822')
+        ) {
+            $attachment = new Attachment($this, $structure, $partIdentifier);
             $this->attachments[] = $attachment;
         } elseif ($structure->type == 0 || $structure->type == 1) {
-
             $messageBody = isset($partIdentifier) ?
                 imap_fetchbody($this->imapStream, $this->uid, $partIdentifier, FT_UID)
                 : imap_body($this->imapStream, $this->uid, FT_UID);
 
             $messageBody = self::decode($messageBody, $structure->encoding);
 
-            if (!empty($parameters['charset']) && $parameters['charset'] !== self::$charset)
-                $messageBody = iconv($parameters['charset'], self::$charset, $messageBody);
+            if (!empty($parameters['charset']) && $parameters['charset'] !== self::$charset) {
+                if (function_exists('mb_convert_encoding')) {
+                    $messageBody = mb_convert_encoding($messageBody, self::$charset, $parameters['charset']);
+                } else {
+                    $messageBody = iconv($parameters['charset'], self::$charset . self::$charsetFlag, $messageBody);
+                }
+            }
 
-            if (strtolower($structure->subtype) == 'plain' || $structure->type == 1) {
+            if (strtolower($structure->subtype) === 'plain' || ($structure->type == 1 && strtolower(
+                        $structure->subtype
+                    ) !== 'alternative')
+            ) {
                 if (isset($this->plaintextMessage)) {
                     $this->plaintextMessage .= PHP_EOL . PHP_EOL;
                 } else {
@@ -453,7 +485,6 @@ class Message
 
                 $this->plaintextMessage .= trim($messageBody);
             } else {
-
                 if (isset($this->htmlMessage)) {
                     $this->htmlMessage .= '<br><br>';
                 } else {
@@ -469,8 +500,9 @@ class Message
             foreach ($structure->parts as $partIndex => $part) {
                 $partId = $partIndex + 1;
 
-                if (isset($partIdentifier))
+                if (isset($partIdentifier)) {
                     $partId = $partIdentifier . '.' . $partId;
+                }
 
                 $this->processStructure($part, $partId);
             }
@@ -480,22 +512,23 @@ class Message
     /**
      * This function takes in the message data and encoding type and returns the decoded data.
      *
-     * @param  string     $data
+     * @param  string $data
      * @param  int|string $encoding
      * @return string
      */
     public static function decode($data, $encoding)
     {
-        if (!is_numeric($encoding))
+        if (!is_numeric($encoding)) {
             $encoding = strtolower($encoding);
+        }
 
-        switch ($encoding) {
-            case 'quoted-printable':
-            case 4:
+        switch (true) {
+            case $encoding === 'quoted-printable':
+            case $encoding === 4:
                 return quoted_printable_decode($data);
 
-            case 'base64':
-            case 3:
+            case $encoding === 'base64':
+            case $encoding === 3:
                 return base64_decode($data);
 
             default:
@@ -506,7 +539,7 @@ class Message
     /**
      * This function returns the body type that an imap integer maps to.
      *
-     * @param  int    $id
+     * @param  int $id
      * @return string
      */
     public static function typeIdToString($id)
@@ -548,13 +581,17 @@ class Message
     public static function getParametersFromStructure($structure)
     {
         $parameters = array();
-        if (isset($structure->parameters))
-            foreach ($structure->parameters as $parameter)
+        if (isset($structure->parameters)) {
+            foreach ($structure->parameters as $parameter) {
                 $parameters[strtolower($parameter->attribute)] = $parameter->value;
+            }
+        }
 
-        if (isset($structure->dparameters))
-            foreach ($structure->dparameters as $parameter)
+        if (isset($structure->dparameters)) {
+            foreach ($structure->dparameters as $parameter) {
                 $parameters[strtolower($parameter->attribute)] = $parameter->value;
+            }
+        }
 
         return $parameters;
     }
@@ -569,14 +606,16 @@ class Message
     protected function processAddressObject($addresses)
     {
         $outputAddresses = array();
-        if (is_array($addresses))
+        if (is_array($addresses)) {
             foreach ($addresses as $address) {
-                $currentAddress            = array();
+                $currentAddress = array();
                 $currentAddress['address'] = $address->mailbox . '@' . $address->host;
-                if (isset($address->personal))
+                if (isset($address->personal)) {
                     $currentAddress['name'] = $address->personal;
+                }
                 $outputAddresses[] = $currentAddress;
             }
+        }
 
         return $outputAddresses;
     }
@@ -595,21 +634,24 @@ class Message
      * This function returns the attachments a message contains. If a filename is passed then just that ImapAttachment
      * is returned, unless
      *
-     * @param  null|string             $filename
+     * @param  null|string $filename
      * @return array|bool|Attachment[]
      */
     public function getAttachments($filename = null)
     {
-        if (!isset($this->attachments) || count($this->attachments) < 1)
+        if (!isset($this->attachments) || count($this->attachments) < 1) {
             return false;
+        }
 
-        if (!isset($filename))
+        if (!isset($filename)) {
             return $this->attachments;
+        }
 
         $results = array();
         foreach ($this->attachments as $attachment) {
-            if ($attachment->getFileName() == $filename)
+            if ($attachment->getFileName() == $filename) {
                 $results[] = $attachment;
+            }
         }
 
         switch (count($results)) {
@@ -633,28 +675,33 @@ class Message
      */
     public function checkFlag($flag = 'flagged')
     {
-        return (isset($this->status[$flag]) && $this->status[$flag] == true);
+        return (isset($this->status[$flag]) && $this->status[$flag] === true);
     }
 
     /**
      * This function is used to enable or disable a flag on the imap message.
      *
-     * @param  string                    $flag   Flagged, Answered, Deleted, Seen, Draft
-     * @param  bool                      $enable
+     * @param  string $flag Flagged, Answered, Deleted, Seen, Draft
+     * @param  bool $enable
      * @throws \InvalidArgumentException
      * @return bool
      */
     public function setFlag($flag, $enable = true)
     {
-        if (!in_array($flag, self::$flagTypes) || $flag == 'recent')
+        if (!in_array($flag, self::$flagTypes) || $flag == 'recent') {
             throw new \InvalidArgumentException('Unable to set invalid flag "' . $flag . '"');
+        }
 
-        $flag = '\\' . ucfirst($flag);
+        $imapifiedFlag = '\\' . ucfirst($flag);
 
-        if ($enable) {
-            return imap_setflag_full($this->imapStream, $this->uid, $flag, ST_UID);
+        if ($enable === true) {
+            $this->status[$flag] = true;
+
+            return imap_setflag_full($this->imapStream, $this->uid, $imapifiedFlag, ST_UID);
         } else {
-            return imap_clearflag_full($this->imapStream, $this->uid, $flag, ST_UID);
+            unset($this->status[$flag]);
+
+            return imap_clearflag_full($this->imapStream, $this->uid, $imapifiedFlag, ST_UID);
         }
     }
 
@@ -667,6 +714,16 @@ class Message
      */
     public function moveToMailBox($mailbox)
     {
-        return imap_mail_copy($this->imapStream, $this->uid, $mailbox, CP_UID | CP_MOVE);
+        $currentBox = $this->imapConnection->getMailBox();
+        $this->imapConnection->setMailBox($this->mailbox);
+
+        $returnValue = imap_mail_copy($this->imapStream, $this->uid, $mailbox, CP_UID | CP_MOVE);
+        imap_expunge($this->imapStream);
+
+        $this->mailbox = $mailbox;
+
+        $this->imapConnection->setMailBox($currentBox);
+
+        return $returnValue;
     }
 }

@@ -54,7 +54,7 @@ class Server
      *
      * @var string
      */
-    protected $mailbox;
+    protected $mailbox = '';
 
     /**
      * This is the username used to connect to the server.
@@ -150,14 +150,23 @@ class Server
     /**
      * This function sets the mailbox to connect to.
      *
-     * @param string $mailbox
+     * @param  string $mailbox
+     * @return bool
      */
     public function setMailBox($mailbox = '')
     {
+        if (!$this->hasMailBox($mailbox)) {
+            return false;
+        }
+
+
+
         $this->mailbox = $mailbox;
         if (isset($this->imapStream)) {
             $this->setImapStream();
         }
+
+        return true;
     }
 
     public function getMailBox()
@@ -213,7 +222,7 @@ class Server
     public function setOptions($bitmask = 0)
     {
         if (!is_numeric($bitmask))
-            throw new \Exception();
+            throw new \RuntimeException('Function requires numeric argument.');
 
         $this->options = $bitmask;
     }
@@ -363,6 +372,40 @@ class Server
         }
 
         return $messages;
+    }
+
+    /**
+     * Returns the emails in the current mailbox as an array of ImapMessage objects
+     * ordered by some ordering
+     *
+     * @see    http://php.net/manual/en/function.imap-sort.php
+     * @param  int       $orderBy
+     * @param  bool      $reverse
+     * @param  int       $limit
+     * @return Message[]
+     */
+    public function getOrdered($orderBy, $reverse, $limit)
+    {
+        $msgIds = imap_sort($this->getImapStream(), $orderBy, $reverse ? 1 : 0, SE_UID);
+
+        return array_map(array($this, 'getMessageByUid'), array_slice($msgIds, 0, $limit));
+    }
+
+    /**
+     * Returns the requested email or false if it is not found.
+     *
+     * @param  int          $uid
+     * @return Message|bool
+     */
+    public function getMessageByUid($uid)
+    {
+        try {
+            $message = new \Fetch\Message($uid, $this);
+
+            return $message;
+        } catch (\Exception $e) {
+            return false;
+        }
     }
 
     /**
